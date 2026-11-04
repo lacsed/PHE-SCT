@@ -66,3 +66,10 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Secrets: Wi-Fi and identity keys of the boards (make them from secrets.example.h)
+secrets.h
+
+# Python caches and recorded runs
+__pycache__/
+*.bin
