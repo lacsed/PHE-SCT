@@ -177,9 +177,11 @@ preparation time is reported apart.
    `supervisor_data_cluster_tool_2.h` is the supervisor of the 2-cluster tool
    (45 states, 14 events), made by `../notebook/generator_ultrades.ipynb` from
    UltraDES; the notebook writes the header of other supervisors in the same
-   format. The supervisor board keeps two copies of the encrypted state, 128
-   bytes per state on P-256: a supervisor of thousands of states needs PSRAM
-   on that board (Tools → PSRAM → OPI PSRAM).
+   format, and with `PROBLEM = 'cluster_tool_3'` or `'cluster_tool_4'` those of
+   the 3- and 4-cluster tools measured below (419 and 4184 states, with the
+   traces of those runs). The supervisor board keeps two copies of the
+   encrypted state, 128 bytes per state on P-256: a supervisor of thousands of
+   states needs PSRAM on that board (Tools → PSRAM → OPI PSRAM).
 
 3. Open both Serial Monitors, then RESET both boards.
 
@@ -196,28 +198,44 @@ is the baseline of the encrypted step.
 
 ## On the boards
 
-Two ESP32-S3, P-256, one run of the 28 steps of the trace; every decision of
-every step matched the supervisor in clear:
+Two ESP32-S3, P-256, one run per size; every decision of every step matched
+the supervisor in clear:
 
-| 2-cluster tool | |
-|---|---|
-| states, decision rows, steps | 45, 7, 28 |
-| step, mean (from the event to the decisions) | 1078.1 ms (1071.9–1091.5) |
-| plant: waiting for the rows | 210.1 ms |
-| plant: zero tests | 868.0 ms (124.0 ms per row) |
-| supervisor: the new state (decrypting the event, moving the cells) | 0.6 ms |
-| supervisor: the rows | 931.5 ms (133.1 ms per row) |
-| supervisor: Enc(0) per step, drawn before the event | 7, one per row |
-| supervisor, between events | 1.6 s (227.3 ms per Enc(0)) |
-| encrypting the initial state | 10.2 s |
-| rows asked for again | 0 |
+| | 2-cluster tool | 3-cluster tool | 4-cluster tool |
+|---|---|---|---|
+| states, decision rows, steps | 45, 7, 28 | 419, 11, 44 | 4184, 15, 60 |
+| step, mean (from the event to the decisions) | 1078.1 ms (1071.9–1091.5) | 1961.3 ms (1937.1–2071.0) | 6876.1 ms (6844.4–7001.2) |
+| plant: waiting for the rows | 210.1 ms | 596.4 ms | 5015.5 ms |
+| plant: zero tests | 868.0 ms (124.0 ms per row) | 1364.9 ms (124.1 ms per row) | 1860.6 ms (124.0 ms per row) |
+| supervisor: the new state (decrypting the event, moving the cells) | 0.6 ms | 5.1 ms | 50.0 ms |
+| supervisor: the rows | 931.5 ms (133.1 ms per row) | 1787.0 ms (162.5 ms per row) | 6627.6 ms (441.8 ms per row) |
+| supervisor: Enc(0) per step, drawn before the event | 7, one per row | 11, one per row | 15, one per row |
+| supervisor, between events | 1.6 s (227.3 ms per Enc(0)) | 2.5 s (227.8 ms per Enc(0)) | 3.4 s (228.0 ms per Enc(0)) |
+| from the first event to the end of the run (plant) | not measured | 194.0 s (4.41 s per event) | 614.5 s (10.24 s per event) |
+| encrypting the initial state | 10.2 s | 95.5 s | 952.8 s |
+| rows sent again | 0 | 6 (2 NACKs) | 896 (821 NACKs, see below) |
 
 A row costs the supervisor more than a zero test costs the plant (most of it
 is D = −k_S U, the rest the sum), so the step is the supervisor's new state
 and rows, plus the last zero test and the link: the plant tests each row while
 the supervisor makes the next. The step grows with the rows and the size of
 their sums, the time between events with the rows only, and the encryption of
-the initial state with the number of states.
+the initial state with the number of states. In the 3-cluster run, five steps
+(2001–2071 ms) waited 60–120 ms more for their rows, with the same zero tests;
+without them the mean is 1951.5 ms. A whole 3-cluster run takes about 5 min:
+95.5 s encrypting the initial state, then 194.0 s for the 44 events (the
+plant's clock, from the first event to the end). The 4-cluster run took
+26.4 min from the plant's boot, both boards reset together: 952.8 s encrypting
+the initial state, then 614.5 s for the 60 events.
+
+The 4-cluster run was made before commit `56356f0`. There a row took the
+supervisor 441.8 ms, longer than the 300 ms of silence after which the plant
+then asked with a `NACK` for the rows it lacked: it asked in almost every gap,
+and the supervisor sent almost every row twice. Every decision still came
+right; the plant drops the copies. Since `56356f0` the plant waits twice the
+gap between rows that it measures: on a host, with a supervisor slowed to
+450 ms per row, the plant sent 168 `NACK`s in 28 steps before this change and
+1 after it.
 
 The version described in the paper, protocol 6, is at commit `760003a`: the
 supervisor never saw the event (it sent a candidate for every transition of
