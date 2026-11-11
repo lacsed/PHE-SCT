@@ -141,11 +141,12 @@ static int cr_join(uint8_t role, const uint8_t msg[KEY_MSG]) {
 }
 static int cr_session(uint32_t epoch_plant, uint32_t epoch_supervisor) {
     uint64_t w = mmul(g_mnegk, g_mYj);              // -k_i k_j: the same on both boards
-    for (int d = 0; d < 2; ++d) {
+    for (int d = 0; d < 3; ++d) {
         uint8_t m[17];
         memcpy(m, &w, 8); m[8] = (uint8_t)(d + 1);
         memcpy(m + 9, &epoch_plant, 4); memcpy(m + 13, &epoch_supervisor, 4);
-        g_mmac[d] = mhash(m, sizeof(m));
+        if (d < 2) g_mmac[d] = mhash(m, sizeof(m));
+        else for (int i = 0; i < 4; ++i) { uint64_t h = mhash(m, sizeof(m), 1469598103934665603ULL + i); memcpy(g_evk + 8 * i, &h, 8); }
     }
     return 0;
 }
@@ -153,6 +154,11 @@ static void cr_mac(bool mine, const uint8_t* msg, size_t len, uint8_t tag[DES_TA
     int d = (mine ? DES_ROLE : 3 - DES_ROLE) - 1;
     uint64_t h1 = mhash(msg, len, g_mmac[d]), h2 = mhash(msg, len, g_mmac[d] ^ 0x5bd1e995ULL);
     memcpy(tag, &h1, 8); memcpy(tag + 8, &h2, 8);
+}
+static void cr_kdf(const uint8_t key[32], const char* label, uint8_t out[32]) {
+    uint64_t h[4];
+    for (int i = 0; i < 4; ++i) h[i] = mhash((const uint8_t*)label, strlen(label), mhash(key, 32, 1469598103934665603ULL + i));
+    memcpy(out, h, 32);
 }
 static int cr_enc(int m, uint8_t cell[CELL_RAW]) {
     uint64_t r = mrand();
@@ -162,12 +168,6 @@ static int cr_enc(int m, uint8_t cell[CELL_RAW]) {
 static int cr_sum(const uint8_t* const* cells, int cnt, uint8_t out[CELL_RAW]) {
     uint64_t u = 0, v = 0;
     for (int i = 0; i < cnt; ++i) { u = madd(u, get_raw(cells[i])); v = madd(v, get_raw(cells[i] + PT_RAW)); }
-    put(u, out); put(v, out + PT_RAW);
-    return 0;
-}
-static int cr_rerandomize(const uint8_t* cell, const uint8_t z[CELL_RAW], uint8_t out[CELL_RAW]) {
-    uint64_t u = madd(cell ? get_raw(cell) : 0, get_raw(z));
-    uint64_t v = madd(cell ? get_raw(cell + PT_RAW) : 0, get_raw(z + PT_RAW));
     put(u, out); put(v, out + PT_RAW);
     return 0;
 }

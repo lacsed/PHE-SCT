@@ -9,10 +9,12 @@ and writes every frame of the run; it stops a few seconds after the plant's
 FIN (or with Ctrl-C).
 
 check takes the recording, the supervisor's tables (the header) and its
-opening (the seed it printed in its summary, given to the auditor only), and
-its identity public key (DES_PUB_SUPERVISOR of secrets.h). From the seed it
-redoes everything the supervisor board computed: its key share, the initial
-encryption, and, at every step, the permutation, every candidate and every
+opening (the seed it printed at boot, given to the auditor only), and its
+identity public key (DES_PUB_SUPERVISOR of secrets.h). From the seed and the
+events of the run (encrypted in the plant's STEP frames: the seed gives the
+supervisor's key share, and with the plant's share in its KEY, the key of the
+event's encryption) it redoes everything the supervisor board computed: its key share, the
+initial encryption, and, at every step, the new encrypted state and every
 decision with the supervisor's part of its decryption. It compares them with
 the frames of the recording, and these with the chain of records that the
 supervisor signed after every step. A difference is a deviation of the
@@ -35,7 +37,8 @@ from make_keys import CURVES
 FRAME, TAG = 1400, 16
 HDR = struct.Struct('<IBBHHHIIII')            # magic type role chunk nchunks count epoch peer cfg seq
 MAGIC = 0x4C505344
-T_KEY, T_READY, T_STEP, T_CAND, T_NEWST, T_DECS, T_NACK, T_FIN, T_SIGN = range(1, 10)
+T_KEY, T_READY, T_STEP, T_DECS, T_NACK, T_FIN, T_SIGN = 1, 2, 3, 6, 7, 8, 9
+NO_EVENT = 0xFFFF
 PLANT, SUPERVISOR = 1, 2
 
 
@@ -124,12 +127,13 @@ def read_header(path):
         pairs.append([(t['trans'][2 * (off + p)], t['trans'][2 * (off + p) + 1]) for p in range(t['tcnt'][e])])
         off += t['tcnt'][e]
     t['pairs'] = pairs
-    # candidates and decision rows, in the order of build_tables()
-    cand = []
+    # per event, the states that it moves into each state; the decision rows,
+    # in the order of build_tables()
+    moves = []
     for e in range(E):
         into = {}
         for frm, to in pairs[e]: into.setdefault(to, []).append(frm)
-        cand += [(e, q, into[q]) for q in range(NS) if q in into]
+        moves.append(into)
     rows = []
     en = lambda e, q: t['enable'][e * NS + q] != 0
     for e in range(E):
@@ -140,7 +144,7 @@ def read_header(path):
                 break
         else:
             rows.append([1 << e, [q for q in range(NS) if en(e, q)]])
-    t['cand'], t['rows'] = cand, rows
+    t['moves'], t['rows'] = moves, rows
     return t
 
 
@@ -186,24 +190,18 @@ class Audit:
     def __init__(self, g, seed):
         self.g, self.seed = g, seed
 
-    def det(self, tag, a, b, ctr):
-        return hmac.new(self.seed, tag.encode() + struct.pack('<II', a, b) + bytes([ctr]), hashlib.sha256).digest()
+    def det(self, tag, a, b, ctr, key=None):
+        return hmac.new(key or self.seed, tag.encode() + struct.pack('<II', a, b) + bytes([ctr]),
+                        hashlib.sha256).digest()
 
-    def det_scalar(self, tag, a, b):
-        return self.g.scalar(self.det(tag, a, b, 1) + self.det(tag, a, b, 2))
+    def det_scalar(self, tag, a, b, key=None):
+        return self.g.scalar(self.det(tag, a, b, 1, key) + self.det(tag, a, b, 2, key))
 
-    def det_u32(self, tag, a, b):
-        return struct.unpack('<I', self.det(tag, a, b, 1)[:4])[0]
-
-    def enc(self, m, tag, a, b):                # cr_enc_det
-        g, s = self.g, self.det_scalar(tag, a, b)
+    def enc(self, m, tag, a, b, key=None):      # cr_enc_det, under the seed or the key given
+        g, s = self.g, self.det_scalar(tag, a, b, key)
         V = g.mul(s, self.Y)
         if m: V = g.add(V, g.G)
         return (g.mul(s, g.G), V)
-
-    def cell(self, b):
-        P = 2 * self.g.size
-        return (self.g.point(b[:P]), self.g.point(b[P:2 * P]))
 
     def raw(self, c): return self.g.raw(c[0]) + self.g.raw(c[1])
     def addc(self, c, d): return (self.g.add(c[0], d[0]), self.g.add(c[1], d[1]))
@@ -215,14 +213,18 @@ class Audit:
         return g.add(g.mul(z, g.G), g.mul(g.n - c, X)) == R
 
 
+def kdf(key, label):                            # cr_kdf
+    return hmac.new(key, label, hashlib.sha256).digest()
+
+
 def check(a):
     g = Mock(a.curve) if a.mock else Nist(a.curve)
     t = read_header(a.header)
-    NS, P, SC = t['NS'], 2 * g.size, g.size
+    NS, E, P, SC = t['NS'], t['E'], 2 * g.size, g.size
     CELL, SIG = 2 * P, P + SC
     KEY_MSG = P + SIG
     KEY_PAY = KEY_MSG + 32
-    CAND_ITEM, DECS_ITEM = 3 + CELL, 8 + CELL + P
+    DECS_ITEM = 8 + CELL + P
     au = Audit(g, bytes.fromhex(a.seed))
     Xs = g.point(bytes.fromhex(a.supervisor_pub))
     data = open(a.run, 'rb').read()
@@ -253,7 +255,13 @@ def check(a):
     print('commitment opened: the seed and the tables are those the supervisor committed to at boot')
     kS = au.det_scalar('share', 0, 0)
     if g.raw(g.mul(kS, g.G)) != s_pay[:P]: sys.exit('the supervisor\'s key share is not derived from its seed')
-    au.Y = g.add(g.point(p_pay[:P]), g.point(s_pay[:P]))
+    Yp = g.point(p_pay[:P])
+    au.Y = g.add(Yp, g.point(s_pay[:P]))
+    # the key of the event's encryption (cr_session), K_1, and the supervisor's seed of
+    # the encryptions of zero of the boot, z_0; both move on at every step
+    w = g.raw(g.mul(g.n - kS, Yp))[:SC]
+    evk = hmac.new(w, b'des_split' + bytes([3]) + struct.pack('<II', ep, es), hashlib.sha256).digest()
+    zs = kdf(au.seed, b'des_split zeros')
 
     # the frames of the session, one copy each
     msg = {}
@@ -265,16 +273,9 @@ def check(a):
     # A recording over Wi-Fi misses frames: multicast is not acknowledged, and
     # the boards ask each other for the ones they lack, the recorder cannot.
     # What the recording lacks is reported apart, and the rest still checked.
-    PAY = FRAME - HDR.size - TAG
-    shape = {T_CAND: (len(t['cand']), PAY // CAND_ITEM, CAND_ITEM), T_NEWST: (NS, PAY // CELL, CELL),
-             T_DECS: (len(t['rows']), 1, DECS_ITEM)}
-
-    def items(typ, k):                          # the message's frames in order, None for a missing one
-        total, per, size = shape[typ]
-        return [msg[(typ, k, c)]['p'][:min(per, total - c * per) * size] if (typ, k, c) in msg else None
-                for c in range((total + per - 1) // per)]
-
-    def decisions(k, c):                        # None for a row with a cell that is not recorded
+    # The state never travels: the auditor computes it from the seed and the
+    # events, so a lost frame costs the check of that frame only.
+    def decisions(k, c, z):                     # None for a row with a cell that is not known
         rows = []
         for gi, (mask, cells) in enumerate(t['rows']):
             if any(c[q] is None for q in cells):
@@ -282,10 +283,35 @@ def check(a):
                 continue
             d = (g.O, g.O)
             for q in cells: d = au.addc(d, c[q])
-            d = au.addc(d, au.enc(0, 'dz', k, gi))
+            d = au.addc(d, au.enc(0, 'dz', k, gi, z))
             D = g.mul(g.n - kS, d[0]) if d[0] != g.O else g.O
             rows.append(struct.pack('<Q', mask) + au.raw(d) + g.raw(D))
         return rows
+
+    # The new state of step k, event ev: the cells move. A state that ev leads
+    # into gets the cell of the state it comes from (the sum, if several); the
+    # cells of the states that ev does not leave go, in the order of the
+    # states, to the states that ev leads nothing into, and if they run out,
+    # those get enc(0, 'z0', k, j) under z_k, j = 0, 1, ...
+    def move(k, ev, c, z):
+        into = t['moves'][ev]
+        left = set(s for srcs in into.values() for s in srcs)
+        rest = [c[q] for q in range(NS) if q not in left]
+        new, j = [], 0
+        for q in range(NS):
+            if q in into:
+                cell = (g.O, g.O)
+                for s in into[q]: cell = None if cell is None or c[s] is None else au.addc(cell, c[s])
+                new.append(cell)
+            elif rest:
+                new.append(rest.pop(0))
+            else:
+                new.append(au.enc(0, 'z0', k, j, z))
+                j += 1
+        return new
+
+    def record(h, k, evx, rows):                # chain_step: the event encrypted
+        return sha(h + struct.pack('<IH', k, evx) + sha(b''.join(sha(r) for r in rows)))
 
     print('redoing every step', flush=True)
     h = sha(b'des_split record' + p_pay + s_pay + struct.pack('<II', ep, es))
@@ -293,62 +319,53 @@ def check(a):
     # Up to the last step of the run, which the plant's FIN names: a step whose
     # frames were all lost is reported as such, not taken for the end.
     fin = [key[1] for key in msg if key[0] == T_FIN]
-    seen = [key[1] for key in msg if key[0] in (T_CAND, T_NEWST, T_DECS, T_SIGN)]
+    seen = [key[1] for key in msg if key[0] in (T_STEP, T_DECS, T_SIGN)]
     last = max(fin + seen) if fin + seen else -1
     if not fin: print('no FIN in the recording: it may end before the run did', flush=True)
     k, steps_ok, steps_part = 0, 0, 0
     while k <= last:
-        cand_rec, newst_rec = (items(T_CAND, k), items(T_NEWST, k)) if k > 0 else ([], [])
-        decs_rec = items(T_DECS, k)
-        bad, miss = [], []
-        if k > 0:
-            label = list(range(NS))
-            for i in range(NS - 1, 0, -1):
-                j = au.det_u32('perm', k, i) % (i + 1)
-                label[i], label[j] = label[j], label[i]
-            per, unknown = shape[T_CAND][1], 0
-            order = sorted(range(len(t['cand'])), key=lambda i: (t['cand'][i][0], label[t['cand'][i][1]]))
-            for idx, ci in enumerate(order):                       # by event, then label
-                e, to, srcs = t['cand'][ci]
-                got = cand_rec[idx // per]
-                if got is None: continue
-                if any(c[s] is None for s in srcs):
-                    unknown += 1
-                    continue
-                cell = c[srcs[0]]
-                for src in srcs[1:]: cell = au.addc(cell, c[src])
-                cell = au.addc(cell, au.enc(0, 'cand', k, idx))
-                i = idx % per
-                if bytes([e]) + struct.pack('<H', label[to]) + au.raw(cell) != got[i * CAND_ITEM:(i + 1) * CAND_ITEM]:
-                    bad.append(f'candidate {idx}')
-            miss += [f'candidates frame {f}' for f, x in enumerate(cand_rec) if x is None]
-            if unknown: miss.append(f'a cell of {unknown} candidates (the new state of the step before)')
-            per = shape[T_NEWST][1]
-            cells = [None if newst_rec[l // per] is None else
-                     au.cell(newst_rec[l // per][(l % per) * CELL:(l % per + 1) * CELL]) for l in range(NS)]
-            c = [cells[label[q]] for q in range(NS)]
-            miss += [f'new state frame {f}' for f, x in enumerate(newst_rec) if x is None]
-        unknown = []
-        for gi, row in enumerate(decisions(k, c)):
-            if decs_rec[gi] is None: miss.append(f'decision row {gi}')
-            elif row is None: unknown.append(str(gi))
-            elif row != decs_rec[gi]: bad.append(f'decision row {gi}')
-        if unknown: miss.append('a cell of decision rows ' + ', '.join(unknown))
+        decs_rec = [msg[(T_DECS, k, gi)]['p'][:DECS_ITEM] if (T_DECS, k, gi) in msg else None
+                    for gi in range(len(t['rows']))]
         sign = msg.get((T_SIGN, k, 0))
         signed = sign['p'][:32] if sign else None
+        bad, miss = [], []
         if sign is None: miss.append('SIGN')
         elif not au.schnorr_ok(Xs, b'des_split signed' + struct.pack('<I', k) + signed, sign['p'][32:32 + SIG]):
             bad.append('the supervisor\'s signature is wrong')
             signed = None
-        complete = None not in cand_rec + newst_rec + decs_rec
-        if h is not None and complete:
-            hs = [b''.join(sha(x) for x in r) if r else None for r in (cand_rec, newst_rec, decs_rec)]
-            h = sha(h + struct.pack('<I', k) + b''.join(sha(x) if x else bytes(32) for x in hs))
+        complete = None not in decs_rec
+        ev = evx = NO_EVENT
+        z, zs = zs, kdf(zs, b'des_split next')  # z_k, and z_{k+1} for the next step
+        if k > 0:
+            pad = struct.unpack('<H', kdf(evk, b'des_split event')[:2])[0]
+            evk = kdf(evk, b'des_split next')
+            step = msg.get((T_STEP, k, 0))
+            evx = struct.unpack('<H', step['p'][:2])[0] if step else None
+            if evx is None:
+                miss.append('STEP')
+                if h is not None and complete and signed is not None:   # the event the signature fits
+                    fits = [e for e in range(E) if record(h, k, e ^ pad, decs_rec) == signed]
+                    evx = fits[0] ^ pad if len(fits) == 1 else None
+            ev = None if evx is None else evx ^ pad
+            if ev is None or ev >= E:
+                if ev is not None: bad.append(f'an unknown event {ev}')
+                miss.append('the event, so the state from here on')
+                c = [None] * NS
+            else:
+                c = move(k, ev, c, z)
+        unknown = []
+        for gi, row in enumerate(decisions(k, c, z)):
+            if decs_rec[gi] is None: miss.append(f'decision row {gi}')
+            elif row is None: unknown.append(str(gi))
+            elif row != decs_rec[gi]: bad.append(f'decision row {gi}')
+        if unknown: miss.append('a cell of decision rows ' + ', '.join(unknown))
+        if h is not None and complete and evx is not None:
+            h = record(h, k, evx, decs_rec)
             if signed is not None and signed != h: bad.append('the recorded frames differ from what the supervisor signed')
         else:                                   # the record cannot be redone: go on from the signed one
-            if complete: miss.append('the record of an earlier step')
+            if complete and evx is not None: miss.append('the record of an earlier step')
             h = signed
-        whole = sign is None and all(x is None for x in cand_rec + newst_rec + decs_rec)
+        whole = sign is None and all(x is None for x in decs_rec) and (k == 0 or (T_STEP, k, 0) not in msg)
         if whole: miss = ['every frame of the step']
         if bad: problems.append(f'step {k}: ' + ', '.join(bad) + ('' if complete else
                                 ' (frames of this step are missing: the signature does not cover them)'))

@@ -10,9 +10,11 @@ of EC-ElGamal ciphertexts, one per state of the supervisor: an event moves
 ciphertexts, and each control decision is a homomorphic sum followed by a test
 of whether it encrypts zero. The private key is split between a supervisor
 board, which holds the tables and the encrypted state, and a plant board, which
-observes the events and applies the decisions, so that neither can decrypt
-alone. The supervisor board signs a record of every step, which an auditor can
-check afterwards.
+observes the events, sends each to the supervisor board encrypted, and applies
+the decisions, so that neither can decrypt alone. The supervisor board signs a
+record of every step, which an auditor can check afterwards. The version
+described in the paper, in which the supervisor board never sees the event, is
+at commit `760003a`.
 
 | folder | contents |
 |---|---|

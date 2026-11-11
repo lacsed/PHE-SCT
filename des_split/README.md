@@ -1,46 +1,46 @@
 # des_split — supervisor and plant on two boards
 
-One ESP32 is the **plant**: it replays the trace of the header and decrypts
-the decisions. The other is the **supervisor**: it holds the monolithic
-supervisor's tables and its encrypted state. The **private key is split**
-between them: each board draws its own share at boot and nobody ever holds the
-whole key, so neither board can decrypt anything alone. The supervisor board
-never sees an event or a decision, and it keeps nothing between steps but the
-encrypted state.
+One ESP32 is the **plant**: it replays the trace of the header, sends each
+event to the supervisor and decrypts the decisions. The other is the
+**supervisor**: it holds the monolithic supervisor's tables and its encrypted
+state. The **private key is split** between them: each board draws its own
+share at boot and nobody ever holds the whole key, so neither board can decrypt
+anything alone. The state is never decrypted, and the plant never receives it.
 
-## How a step hides the event
+## A step
 
-The supervisor computes the next encrypted state for **every** event (for each
-transition q → q' of every event, it sends the cell c[q], re-randomized and
-tagged with a label of q'); the plant keeps the cells of the event that
-occurred, adds a fresh encryption of zero to **every** cell, and sends the new
-state back. The supervisor cannot link it to any of the candidates, so it does
-not learn which event it was. It then computes the encrypted decisions — one
-homomorphic sum per distinct row of R among the controllable events — and adds
-its part of the decryption to each; the plant finishes it with a zero test.
+The plant sends the event σ to the supervisor (`STEP`), encrypted, as a
+supervisor of the supervisory control theory receives it. The supervisor
+computes the next encrypted state for σ only, and the cells **move**: the new
+cell of q' is the cell of the state that σ leads to q' (the sum of their cells
+if σ leads several states there). The cells of the states that σ does not
+leave all encrypt 0, since the current state is one that σ leaves; they go, in
+the order of the states, to the states that σ leads nothing into, so that no
+cell is (O, O). In every supervisor of this repository no two states go to the
+same state on one event, so there are exactly as many; otherwise the states
+left get fresh encryptions of zero, drawn at the event. The supervisor then
+computes the encrypted decisions — one homomorphic sum per distinct row of R
+among the controllable events, plus a fresh encryption of zero — adds its part
+of the decryption to each and sends them one row per frame; the plant finishes
+each with a zero test.
 
-| message | direction | frames per step, 2-cluster tool: P-192 | P-224 | P-256 |
-|---|---|---|---|---|
-| `READY` | supervisor → plant, before the event: the candidates are ready | 1 | 1 | 1 |
-| `STEP` | plant → supervisor | 1 | 1 | 1 |
-| `CAND` | supervisor → plant: (event, label, cell) per transition | 6 | 7 | 8 |
-| `NEWST` | plant → supervisor: the re-randomized state | 4 | 4 | 5 |
-| `DECS` | supervisor → plant: (events, sum, its part of the decryption), one row per frame | 7 | 7 | 7 |
+The step's only scalar multiplications are D = −k_S U, one per row, on the
+supervisor and the zero tests on the plant. A sum is kept in Jacobian
+coordinates and costs one field inversion per point at the end, instead of one
+per addition.
 
-The number of frames, the supervisor's work and the plant's work are the same
-for every event: the plant waits for all the candidates, re-randomizes all the
-cells (an empty one goes through the same operations on a dummy point) and
-tests all the rows. A lost frame is asked for again (`NACK`). Cells travel
-uncompressed (96 bytes on P-192, 128 on P-256), so the plant does not compute a
-square root to read each point; a point that is not on the curve is refused.
+| message | direction | frames per step |
+|---|---|---|
+| `READY` | supervisor → plant, before the event: its encryptions of zero are ready | 1 |
+| `STEP` | plant → supervisor: the step and the event, encrypted | 1 |
+| `DECS` | supervisor → plant: (events, sum, its part of the decryption), one row per frame | one per distinct controllable row (7 for the 2-cluster tool) |
+| `SIGN` | supervisor → plant: the signed record of the step | 1 |
 
-## The two boards work at the same time
-
-The plant sends the new state frame by frame, as it re-randomizes it, and the
-supervisor adds each cell to the sums of its rows as it arrives. The supervisor
-then sends the decisions one row per frame, and the plant tests each row while
-the supervisor makes the next. Neither changes what is sent or computed, only
-when: the frame counts and the work stay the same for every event.
+A lost frame is asked for again: a `STEP` that gets no row is sent again, and
+a missing row is asked for with a `NACK`. Cells are stored uncompressed (96
+bytes on P-192, 128 on P-256), so no square root is computed to read a point;
+a point that is not on the curve is refused. The supervisor sends each row as
+soon as it is made, and the plant tests it while the supervisor makes the next.
 
 ## The keys
 
@@ -48,10 +48,11 @@ when: the frame counts and the work stay the same for every event.
 Y_i = k_i·G and a Schnorr proof that it knows k_i. Both encrypt under
 Y = Y_P + Y_S. The proof keeps a board from choosing its share from the
 other's: sending aG − Y_P would make the joint key aG, which that board alone
-could decrypt. A share whose proof fails halts the run. A cell (U, V) under Y
-decrypts to mG = V − k_S·U − k_P·U. The supervisor sends D = −k_S·U with each
-decision sum, never with the state; the plant computes V + D − k_P·U and tests
-for the point at infinity. So the plant cannot decrypt the state either.
+could decrypt. A share whose proof fails halts the run, and so does a joint key
+that is the point at infinity. A cell (U, V) under Y decrypts to
+mG = V − k_S·U − k_P·U. The supervisor sends D = −k_S·U with each decision
+sum, never with the state; the plant computes V + D − k_P·U and tests for the
+point at infinity. So the plant cannot decrypt the state either.
 
 **One identity key per board.** Each board has its own identity key pair, made
 by `make_keys.py`, and knows the other board's public key. `KEY` is signed with
@@ -59,44 +60,43 @@ the identity key; every other frame is signed with HMAC-SHA256/128 under a
 session key, one per direction, derived from the two shares (k_P·k_S·G, which
 only the two boards can compute) and both boards' epochs. Each board compiles
 in only its own private key, so a copy of one board's flash does not let anyone
-pass for the other board — which a key shared by both boards did.
+pass for the other board.
 
-## What the plant learns about the supervisor
+**The event is encrypted**, with a symmetric stream cipher for the link,
+apart from the ElGamal encryption of the state: `STEP` carries σ XOR the first
+two bytes of HMAC-SHA256(K_k, "des_split event"), and the supervisor decrypts
+it with the same two bytes. K_1 is a third session key, derived as the MAC
+keys are, and K_{k+1} = HMAC-SHA256(K_k, "des_split next"): each board moves
+on to the next key once it has used one (a hash ratchet), so neither holds the
+key of a step already done. A `STEP` sent again carries the same encrypted
+event. Nothing of the state is decrypted this way.
 
-Before the event, while it is idle, the supervisor prepares the next step and
-sends `READY`:
+## What each board learns
 
-* it draws a fresh random **permutation** π of the states, tags every
-  candidate (e, π(q')) instead of (e, q') and sends the candidates of each
-  event in label order. The plant puts each cell at its label and sends the
-  new state in label order; the supervisor puts cell π(q) back into state q.
-  The number of a state never shows.
-* it adds its own fresh **encryption of zero** to every candidate, so a
-  candidate is no longer a copy of a cell the plant sent: telling which cell it
-  came from would take the supervisor's key share.
-* it draws one more encryption of zero per decision row, added to that row's
-  sum, so the plant cannot find which of its cells make up a sum either (with
-  45 states, a meet-in-the-middle search would otherwise give the enabled
-  sets).
+**The supervisor** learns the events, and so, from its tables, it can follow
+the state: the state is never decrypted, but the supervisor does not need to
+decrypt it. **The plant** learns the decisions and nothing else of the
+supervisor: it never receives a cell of the state, and every decision sum
+carries its own fresh encryption of zero, so the rows of R do not show either
+(without it, a row that is the union of two others would have the sum of their
+U). **The network** sees neither the events (encrypted) nor the state (never
+sent), only when the frames go.
 
-So the plant learns the number of states, the decisions and which labels each
-event leads to: for every event, the set of states it leads into, up to a
-renaming of the states. The renaming changes every step, but states that
-differ in the events leading into them can still be told apart: 41 of the 45
-states of the 2-cluster tool. After an event that leads into a single state
-(2 of its 14 events), the plant therefore knows the state it reached. Hiding this would take
-a candidate for every label of every event (14 × 45 = 630 per step instead of
-74); we do not pad. The three measures cost one encryption of zero and one
-addition per candidate and per row on the supervisor (81 per step for the
-2-cluster tool), all before the event. In the benchmark the plant fires the next event once
-its pool is full and the supervisor's `READY` has come, so the step time still
-runs from the event to the decisions. A step that comes before the candidates
-are ready has the supervisor finish them on the spot.
+**Whoever reads the supervisor's memory once** finds ciphertexts of the state
+that it cannot relate to anything. The supervisor keeps the event nowhere
+after the move (only its encrypted form, for the record), erases which states it
+left and entered, erases the seed of the audit once the initial state is
+encrypted (with the seed, the initial encryption could be redone, and since
+the cells only move, every cell decrypted), and draws the encryptions of zero
+of step k from a key z_k that moves on as K does. **Whoever reads it twice**
+sees where each cell moved in between, and so the events in between; if it
+knows the state at the first read (at boot, for instance), it knows it at the
+second. Whoever reads it once and records the network from then on can decrypt
+the events that follow, since the next step's key is in RAM. The plant board
+holds no cell of the state.
 
 **Threat model.** Both boards follow the protocol and try to learn what they
-can from what they see (honest-but-curious). A plant board that deviated could
-send ciphertexts of its choice as the new state and decrypt them with the
-supervisor's part of the decryption of the sums; that is out of scope.
+can from what they see (honest-but-curious).
 
 **Integrity is not checked in real time.** A supervisor board that deviates
 from the protocol can send wrong sums, and so make the plant enable a disabled
@@ -104,19 +104,21 @@ event. It is accountable instead: see the audit below.
 
 ## Audit: the supervisor is accountable
 
-The plant cannot check the supervisor's sums without its tables, which it must
-not learn. The supervisor can still be held to them afterwards:
+The plant cannot check the supervisor's sums without its tables. The
+supervisor can still be held to them afterwards:
 
 * at boot it draws a secret **seed**, from which it derives all its randomness
-  (its key share, the initial encryption, the permutations, the encryptions of
-  zero of the candidates and of the sums), and sends in its signed `KEY` the
-  **commitment** SHA-256("des_split commit" ‖ seed ‖ tables);
-* both boards chain a SHA-256 over every step's messages (the candidates, the
-  new state, the decisions), and after every step the supervisor **signs** the
-  chain head (`SIGN`). Between events, the plant checks that the signed head is
-  the one it computed from what it received, and that the signature is valid,
-  before firing the next event; it prints the signed record (`[audit]` lines)
-  and stops if a record is missing or wrong.
+  (its key share, the initial encryption, the encryptions of zero of the state
+  and of the sums), and sends in its signed `KEY` the **commitment**
+  SHA-256("des_split commit" ‖ seed ‖ tables);
+* both boards chain a SHA-256 over every step's event, encrypted as `STEP`
+  carried it, and decisions, and after every step the supervisor **signs** the
+  chain head (`SIGN`). With the event in the clear, whoever records the
+  network could find it by trying every event against the signed head. Between events,
+  the plant checks that the signed head is the one it computed from what it
+  sent and received, and that the signature is valid, before firing the next
+  event; it prints the signed record (`[audit]` lines) and stops if a record is
+  missing or wrong.
 
 An auditor, who may see the tables, records the run from the network and, with
 the seed the supervisor opens to it, redoes every step:
@@ -129,42 +131,37 @@ router's 2.4 GHz and 5 GHz networks may not pass multicast to each other), and
 `record` must start before the boards are reset, since the run begins with the
 `KEY` frames. The seed changes at every boot: use the one of the recorded run.
 
-The recorder only listens: a frame lost on the air on its way to the computer
-is not sent again (multicast is not acknowledged; the boards ask each other for
-the frames they lack, the recorder cannot). `check` reports what the recording
-lacks apart from deviations, checks the rest, and goes on from the record the
-supervisor signed, up to the last step, which the plant's `FIN` names (a step
-whose frames were all lost is reported too, and a recording without `FIN` may
-have ended before the run). In one board run the recording (702 frames of the run)
-lacked 2 (a decision row of step 12, a frame of candidates of step 22): 27 steps were
-checked entirely, 2 except those frames, and no deviation was found.
-
-`check` opens the commitment, recomputes the supervisor's share, every
-candidate and every decision with its part of the decryption, and compares
-them with the recording and with the chain the supervisor signed: a difference
-is a deviation, which the signature makes undeniable. On the host, a
-supervisor made to add an encryption of 1 to one decision of step 3 was
-reported as `DEVIATION step 3: decision row 0`; an honest run passed all 29
-steps. The supervisor prints its seed in its summary (a prototype: a deployment
-would keep it for the auditor only). Revealing the seed reveals the
-supervisor's randomness and its key share of that run, not the events: the
-plant's randomness and share stay secret.
+The state never travels: `check` computes it from the seed and the events (in
+the plant's `STEP` frames, which it decrypts: the seed gives the supervisor's
+share, and with the plant's share in its `KEY`, the key of the event's
+encryption), so a
+frame that the recording lacks costs the check of that frame only. A step
+whose `STEP` was not recorded is still checked: the event is the one whose
+record matches the signature. `check` opens the commitment, recomputes the
+supervisor's share, the state and every decision with its part of the
+decryption, and compares them with the recording and with the chain the
+supervisor signed: a difference is a deviation, which the signature makes
+undeniable. The supervisor prints its seed at boot and erases it once the
+initial state is encrypted (a prototype: a deployment would hand it to the
+auditor only). Revealing the seed reveals the supervisor's randomness and its
+key share of that run, and so the events and the state, which the auditor
+needs: the plant's share stays secret.
 
 The cost is one signature per step on the supervisor and one verification on
 the plant, both between events.
 
 ## Encryptions of zero drawn before the event
 
-Drawing an encryption of zero (sG, sY) costs two scalar multiplications, and a
-step needs one per state. The plant draws them **before** the event, while it
-is idle, into a pool of n entries kept in RAM only (regenerated at every boot,
-never written to flash). Each entry is used for one cell and then erased, so
-no encryption of zero is ever used twice; a step that finds the pool empty
-draws what it lacks on the spot. The benchmark replays the trace back to back,
-so the plant refills the pool before firing the next event: that stands for
-the time a real plant spends between two events. The step time is then the
-latency from the event to the decisions, and the refill time is reported
-apart.
+Drawing an encryption of zero (sG, sY) costs two scalar multiplications. The
+supervisor draws those of a step, one per decision row, **before** the event,
+while it is idle, kept in RAM only (regenerated at every boot, never written
+to flash). Each is used once and then erased, so no encryption of zero is
+ever used twice; a step that comes before they are ready has the supervisor
+finish them on the spot. The benchmark replays the trace
+back to back, so the plant fires the next event once the supervisor's `READY`
+has come: that stands for the time a real plant spends between two events. The
+step time is then the latency from the event to the decisions, and the
+preparation time is reported apart.
 
 ## Run
 
@@ -179,51 +176,65 @@ apart.
    `supervisor_data_cluster_tool_2.h` is the supervisor of the 2-cluster tool
    (45 states, 14 events), made by `../notebook/generator_ultrades.ipynb` from
    UltraDES; the notebook writes the header of other supervisors in the same
-   format.
+   format. The supervisor board keeps two copies of the encrypted state, 128
+   bytes per state on P-256: a supervisor of thousands of states needs PSRAM
+   on that board (Tools → PSRAM → OPI PSRAM).
 
 3. Open both Serial Monitors, then RESET both boards.
 
 The plant prints, at every step, the decisions next to those of the
 supervisor in clear (an oracle a deployment would omit) and the time from the
-event to the decisions, split into candidates, re-randomizing and sending the
-new state (of it, encryptions of zero drawn on the spot: 0 with the pool),
-waiting for the decisions, and the zero tests, which overlap with the
-supervisor's work. The summary gives the means, and how long each board needs
-between two events. At boot, before waiting for the other board, the plant
-also prints `[clear]`: the time of a step of the same supervisor unencrypted
-on that board (its move and its decisions, from the tables in flash), over the
-whole trace 100 times. It is the baseline of the encrypted step.
+event to the decisions, split into the wait for them (the supervisor's new
+state and sums, and the link) and the zero tests, which overlap with the
+supervisor's work. The summaries give the means, how long the supervisor
+needs between two events, and (the plant's) how long the whole run took. At
+boot, before waiting for the other board, the plant also prints `[clear]`: the
+time of a step of the same supervisor unencrypted on that board (its move and
+its decisions, from the tables in flash), over the whole trace 100 times. It
+is the baseline of the encrypted step.
 
 ## On the boards
 
-Two ESP32-S3-N16R8 boards, P-256, the current version (split key, hidden
-logic, the two boards at the same time, the audit); every decision of every
-run matched the supervisor in clear:
+Two ESP32-S3, P-256, one run of the 28 steps of the trace; every decision of
+every step matched the supervisor in clear:
 
 | 2-cluster tool | |
 |---|---|
-| states, candidates, decision rows | 45, 74, 7 |
-| step, mean | 2058.1 ms (3 runs of 28 steps) |
-| re-randomize and send the new state | 795 ms |
-| waiting for the decisions | 351 ms |
-| zero tests | 869 ms |
-| supervisor, between events | 19.7 s |
-| plant, between events | 10.2 s |
-| encrypting the initial state | 10.3 s |
-| the same supervisor in clear (`[clear]`), per step | 0.98 µs |
+| states, decision rows, steps | 45, 7, 28 |
+| step, mean (from the event to the decisions) | 1078.1 ms (1071.9–1091.5) |
+| plant: waiting for the rows | 210.1 ms |
+| plant: zero tests | 868.0 ms (124.0 ms per row) |
+| supervisor: the new state (decrypting the event, moving the cells) | 0.6 ms |
+| supervisor: the rows | 931.5 ms (133.1 ms per row) |
+| supervisor: Enc(0) per step, drawn before the event | 7, one per row |
+| supervisor, between events | 1.6 s (227.3 ms per Enc(0)) |
+| encrypting the initial state | 10.2 s |
+| rows asked for again | 0 |
 
-An operation costs 17.7 ms to re-randomize and send a cell, 124 ms per zero
-test and 243 ms per item the supervisor prepares. The step grows with the
-number of states, the time between events with the number of transitions: an
-event can be processed at full speed every 22 s.
+A row costs the supervisor more than a zero test costs the plant (most of it
+is D = −k_S U, the rest the sum), so the step is the supervisor's new state
+and rows, plus the last zero test and the link: the plant tests each row while
+the supervisor makes the next. The step grows with the rows and the size of
+their sums, the time between events with the rows only, and the encryption of
+the initial state with the number of states.
+
+The version described in the paper, protocol 6, is at commit `760003a`: the
+supervisor never saw the event (it sent a candidate for every transition of
+every event and the plant kept those of the event that occurred), and on the
+2-cluster tool it took 2058.1 ms per step (mean of 3 runs) and 19.7 s between
+events on the supervisor.
 
 ## Test on a host
 
-`host_main.cpp` builds either role with g++ (see its header). Without mbedTLS
-it uses a mock group with the same algebra and no security, enough to test the
-protocol: the 2-cluster tool passes every step, also with 20 % of the frames
-dropped (`-DDES_SIMULATE_LOSS_PCT=20`). With the fake mbedTLS of the
-tests (real SHA-256, a mock group), `audit.py check --mock` audits a host run.
-The identity keys can be given
+`host_main.cpp` builds either role with g++ (see its header). With mbedTLS
+(`libmbedtls-dev`, the 3.6 of the Arduino-ESP32 core 3.x), the 2-cluster tool
+passes every step on P-256 (18.7 ms per step on a PC), also with 20 % of the
+frames dropped
+(`-DDES_SIMULATE_LOSS_PCT=20`) and with four transitions added that lead a
+second state into one that the event already enters; `audit.py check` passes
+every step of these recorded runs, also when the recording lacks a `STEP`, and
+reports `DEVIATION step 3: decision row 0` for a supervisor made to add an
+encryption of 1 to that row. Without mbedTLS it uses a mock group with the same algebra
+and no security, enough to test the protocol. The identity keys can be given
 on the command line (`-DDES_ID_PLANT=...` and the three others), which then
 wins over `secrets.h`.
