@@ -37,7 +37,8 @@ per addition.
 | `SIGN` | supervisor → plant: the signed record of the step | 1 |
 
 A lost frame is asked for again: a `STEP` that gets no row is sent again, and
-a missing row is asked for with a `NACK`. Cells are stored uncompressed (96
+a missing row is asked for with a `NACK` after a silence of twice the gap at
+which the rows come (measured by the plant) plus 300 ms. Cells are stored uncompressed (96
 bytes on P-192, 128 on P-256), so no square root is computed to read a point;
 a point that is not on the curve is refused. The supervisor sends each row as
 soon as it is made, and the plant tests it while the supervisor makes the next.
