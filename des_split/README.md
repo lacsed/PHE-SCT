@@ -11,14 +11,17 @@ anything alone. The state is never decrypted, and the plant never receives it.
 
 The plant sends the event σ to the supervisor (`STEP`), encrypted, as a
 supervisor of the supervisory control theory receives it. The supervisor
-computes the next encrypted state for σ only, and the cells **move**: the new
-cell of q' is the cell of the state that σ leads to q' (the sum of their cells
-if σ leads several states there). The cells of the states that σ does not
-leave all encrypt 0, since the current state is one that σ leaves; they go, in
-the order of the states, to the states that σ leads nothing into, so that no
-cell is (O, O). In every supervisor of this repository no two states go to the
-same state on one event, so there are exactly as many; otherwise the states
-left get fresh encryptions of zero, drawn at the event. The supervisor then
+computes the next encrypted state for σ only, and the cells **move**, as if
+the supervisor were completed so that every event is a permutation of its
+states: the new cell of q' is the cell of the state that σ leads to q' (the
+sum of their cells if σ leads several states there); a state that σ neither
+leaves nor enters keeps its cell (a self-loop); and a state that σ leaves and
+does not enter gets the cell of a state that σ enters and does not leave (the
+way back), both taken in the order of the states. No cell is ever (O, O), and
+no cell of the state is encrypted again. In every supervisor of this
+repository no two states go to the same state on one event, so every event is
+such a permutation; otherwise the states left get fresh encryptions of zero,
+drawn at the event. The supervisor then
 computes the encrypted decisions — one homomorphic sum per distinct row of R
 among the controllable events, plus a fresh encryption of zero — adds its part
 of the decryption to each and sends them one row per frame; the plant finishes
@@ -186,12 +189,12 @@ preparation time is reported apart.
    256 for NIST P-192, P-224, P-256, about 96, 112 or 128 bits of security;
    256 by default), and flash one board with `#define DES_ROLE DES_PLANT` and
    the other with `DES_SUPERVISOR`. Both boards need the same header and curve.
-   `supervisor_data_cluster_tool_2.h` is the supervisor of the 2-cluster tool
-   (45 states, 14 events), made by `../notebook/generator_ultrades.ipynb` from
+   `supervisor_data_cluster_tool_2.h` and `supervisor_data_cluster_tool_3.h`
+   are the supervisors of the 2- and 3-cluster tools (45 states, 14 events;
+   419 states, 22 events), made by `../notebook/generator_ultrades.ipynb` from
    UltraDES; the notebook writes the header of other supervisors in the same
-   format, and with `PROBLEM = 'cluster_tool_3'` or `'cluster_tool_4'` those of
-   the 3- and 4-cluster tools measured below (419 and 4184 states, with the
-   traces of those runs). The supervisor board keeps two copies of the
+   format, and with `PROBLEM = 'cluster_tool_4'` that of the 4-cluster tool
+   measured below (4184 states, with the trace of that run). The supervisor board keeps two copies of the
    encrypted state, 128 bytes per state on P-256: a supervisor of thousands of
    states needs PSRAM on that board (Tools → PSRAM → OPI PSRAM).
 

@@ -18,7 +18,7 @@ at commit `760003a`.
 
 | folder | contents |
 |---|---|
-| [`des_split/`](des_split/README.md) | the Arduino sketch of both boards, the auditor `audit.py`, `make_keys.py` for the identity keys, the host test `host_main.cpp`, and the supervisor of the two-cluster linear cluster tool |
+| [`des_split/`](des_split/README.md) | the Arduino sketch of both boards, the auditor `audit.py`, `make_keys.py` for the identity keys, the host test `host_main.cpp`, and the supervisors of the linear cluster tool with two and three clusters |
 | `notebook/` | `generator_ultrades.ipynb`, which synthesizes a supervisor with [UltraDES](https://github.com/lacsed/UltraDES) and writes its header |
 
 ## Requirements
